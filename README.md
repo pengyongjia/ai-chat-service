@@ -198,4 +198,4 @@ curl -X POST http://localhost:8082/faq/add \
 
 ## 📄 License
 
-[MIT](LICENSE) © 应有成本估算团队
+[MIT](LICENSE) © pengyongjia
