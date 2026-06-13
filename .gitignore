@@ -47,3 +47,6 @@ chroma_db/
 # 操作系统
 .DS_Store
 Thumbs.db
+
+# 内部技术文档，不提交到 GitHub
+AI服务技术文档.md
