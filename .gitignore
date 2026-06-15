@@ -57,6 +57,10 @@ chroma_db_test/
 # 会话数据（运行时自动生成）
 conversations/
 conversations_test/
+conversations_real_test/
+
+# 真实 API 测试向量库
+chroma_db_real_test/
 
 # 设计文档与配图素材（不提交到 Git）
 docs/

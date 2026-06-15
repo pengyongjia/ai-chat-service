@@ -257,6 +257,8 @@ class ConversationStore:
         """持久化会话到文件"""
         file_path = self._get_file_path(conversation.session_id)
         try:
+            # 运行时目录可能被外部删除，写入前确保存在
+            self.persist_dir.mkdir(parents=True, exist_ok=True)
             file_path.write_text(
                 json.dumps(conversation.to_dict(), ensure_ascii=False, indent=2),
                 encoding="utf-8",

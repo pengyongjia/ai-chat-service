@@ -78,6 +78,53 @@ class LLMClient:
             log.error(f"LLM 调用失败: {e}")
             raise LLMError(f"大模型调用失败: {e}")
 
+    def complete_stream(
+        self,
+        prompt: str = "",
+        system_prompt: str | None = None,
+        messages: list[dict] | None = None,
+        temperature: float = 0.3,
+        max_tokens: int = 500,
+    ):
+        """
+        流式调用 LLM，返回文本块生成器
+
+        Args:
+            prompt: 用户提示词（与 messages 二选一）
+            system_prompt: 可选的系统提示词
+            messages: 完整的 OpenAI 格式消息列表（与 prompt 二选一）
+            temperature: 采样温度
+            max_tokens: 最大生成 token 数
+
+        Yields:
+            每个流式文本块
+        """
+        if messages is None:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            if prompt:
+                messages.append({"role": "user", "content": prompt})
+
+        if not messages:
+            raise LLMError("messages 或 prompt 至少提供一个")
+
+        try:
+            stream = self.client.chat.completions.create(
+                model=config.DEEPSEEK_MODEL,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield delta
+        except Exception as e:
+            log.error(f"LLM 流式调用失败: {e}")
+            raise LLMError(f"大模型流式调用失败: {e}")
+
 
 # 全局 LLM 客户端实例
 llm_client = LLMClient()

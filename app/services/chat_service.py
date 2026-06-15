@@ -105,10 +105,170 @@ class ChatService:
         self._save_to_session(session_id, result)
         return result
 
+    def answer_stream(self, question: str, session_id: str | None = None):
+        """
+        用户提问流式回答
+
+        返回 SSE 事件字典生成器，每个事件包含 type 字段：
+        - start: 开始流式输出
+        - chunk: 文本片段
+        - done: 输出完成，附带完整元数据
+        - error: 发生错误
+
+        Args:
+            question: 用户问题
+            session_id: 会话 ID（可选）
+        """
+        log.info(f"收到用户提问(流式): {question[:50]}...")
+
+        # 0. 保存用户问题到会话
+        if session_id and config.ENABLE_CONVERSATION:
+            conversation_service.add_user_message(session_id, question)
+
+        # 1. 查询重写（可选）
+        search_query = question
+        if config.ENABLE_QUERY_REWRITE:
+            search_query = query_rewriter.rewrite(question)
+            if search_query != question:
+                log.info(f"使用改写后查询: {search_query[:50]}...")
+
+        # 2. 混合检索
+        try:
+            results = vector_store.search(
+                search_query,
+                top_k=config.FAQ_TOP_K + 3,
+                doc_types=["faq", "document"],
+                hybrid=config.ENABLE_HYBRID_SEARCH,
+            )
+            matches = self._parse_results(results)
+        except Exception as e:
+            log.error(f"检索失败: {e}")
+            matches = []
+
+        yield self._sse_event("start")
+
+        if not matches:
+            result = self._reject(question=search_query, confidence=0.0)
+            yield self._sse_event("chunk", {"content": result["answer"]})
+            yield self._sse_event("done", result)
+            self._save_to_session(session_id, result)
+            return
+
+        # 3. 重排序
+        if config.ENABLE_RERANK:
+            ranked = reranker.rerank(search_query, matches, top_k=len(matches))
+            matches = self._ranked_to_matches(ranked)
+
+        # 4. 上下文压缩
+        if matches:
+            matches = context_compressor.compress(
+                search_query,
+                matches,
+                max_total_length=self.MAX_CONTEXT_LENGTH,
+            )
+
+        if not matches:
+            result = self._reject(question=search_query, confidence=0.0)
+            yield self._sse_event("chunk", {"content": result["answer"]})
+            yield self._sse_event("done", result)
+            self._save_to_session(session_id, result)
+            return
+
+        # 5. 高置信命中 FAQ → 直接返回答案（也作为单条 chunk 输出）
+        top_match = matches[0]
+        if top_match["doc_type"] == "faq" and top_match["similarity"] >= config.FAQ_THRESHOLD_HIGH:
+            log.info(f"直接命中 FAQ，相似度: {top_match['similarity']}")
+            result = {
+                "source": "faq",
+                "answer": top_match["answer"],
+                "matched_question": top_match["text"],
+                "confidence": top_match["similarity"],
+                "references": [],
+            }
+            yield self._sse_event("chunk", {"content": result["answer"]})
+            yield self._sse_event("done", result)
+            self._save_to_session(session_id, result)
+            return
+
+        # 6. 不相关 → 拒绝
+        if top_match["similarity"] < config.FAQ_THRESHOLD_LOW:
+            log.info(f"相似度过低，拒绝回答: {top_match['similarity']}")
+            result = self._reject(
+                question=top_match["text"],
+                confidence=top_match["similarity"],
+            )
+            yield self._sse_event("chunk", {"content": result["answer"]})
+            yield self._sse_event("done", result)
+            self._save_to_session(session_id, result)
+            return
+
+        # 7. 半相关 → 流式生成
+        try:
+            context_blocks, references = self._build_context(matches)
+            context_str = "\n\n---\n\n".join(context_blocks)
+
+            system_prompt = f"""你是专业、严谨的智能助手。请严格基于以下参考资料回答用户问题。
+
+参考资料：
+---
+{context_str}
+---
+
+回答规则：
+1. 如果参考资料中有直接答案，请直接引用并清晰回答。
+2. 如果参考资料中没有直接答案，但有关联信息，请基于关联信息合理推断，并明确说明"根据参考资料..."
+3. 如果完全无法从参考资料中得出答案，请明确说明"根据现有资料无法回答该问题"。
+4. 不要编造参考资料之外的内容。
+5. 回答控制在 300 字以内，简洁专业。
+"""
+
+            messages = conversation_service.build_llm_messages(
+                system_prompt=system_prompt,
+                question=question,
+                session_id=session_id,
+            )
+
+            full_answer = ""
+            for delta in llm_client.complete_stream(
+                prompt="",
+                system_prompt=None,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=600,
+            ):
+                full_answer += delta
+                yield self._sse_event("chunk", {"content": delta})
+
+            result = {
+                "source": "llm",
+                "answer": full_answer,
+                "confidence": matches[0]["similarity"],
+                "matched_question": "",
+                "references": references,
+            }
+            yield self._sse_event("done", result)
+            self._save_to_session(session_id, result)
+            log.info("LLM 流式生成回答完成")
+
+        except Exception as e:
+            log.error(f"LLM 流式调用失败: {e}")
+            yield self._sse_event(
+                "error",
+                {"message": f"大模型调用失败: {e}", "code": "LLM_ERROR"},
+            )
+
     def _save_to_session(self, session_id: str | None, result: dict):
         """保存回答到会话"""
         if session_id and config.ENABLE_CONVERSATION:
             conversation_service.add_assistant_message(session_id, result["answer"])
+
+    @staticmethod
+    def _sse_event(event_type: str, data: dict | None = None) -> dict:
+        """构造 SSE 事件字典"""
+        payload = {"type": event_type}
+        if data:
+            payload.update(data)
+        return payload
 
     def _parse_results(self, results: dict) -> list[dict]:
         """解析向量检索结果，统一格式"""

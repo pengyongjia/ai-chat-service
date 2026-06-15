@@ -13,6 +13,7 @@
 - 📄 **文档 RAG**：支持 PDF / Word / Excel / Markdown / TXT 自动解析入库
 - 🔍 **检索优化**：混合检索（向量 + BM25）+ 重排序 + 查询重写 + 上下文压缩
 - 💬 **多轮对话**：支持 session 上下文，可追问和指代消解
+- ⚡ **流式输出**：SSE 打字机效果，提升交互体验
 - 💰 **成本极低**：80% 问题直接命中 FAQ，零 LLM 调用成本
 - 📦 **开箱即用**：300 行代码，JSON 维护知识库，无需数据库
 - 🔌 **多模型支持**：DeepSeek + SiliconFlow / OpenAI / Azure OpenAI 兼容接口
@@ -196,6 +197,7 @@ ai-chat-service/
 | 接口 | 方法 | 说明 |
 |------|------|------|
 | `POST /v1/chat/ask` | 提问 | 核心接口，传入问题返回答案，支持 `session_id` |
+| `POST /v1/chat/stream` | 流式提问 | SSE 打字机效果，支持 `session_id` |
 | `POST /v1/chat/sessions` | 创建会话 | 创建新会话，返回 `session_id` |
 | `GET /v1/chat/sessions` | 会话列表 | 查看所有活跃会话 |
 | `GET /v1/chat/history/{session_id}` | 获取历史 | 查看会话的聊天历史 |
@@ -245,6 +247,47 @@ ai-chat-service/
 - `faq`：直接命中预设答案，零 LLM 成本
 - `llm`：DeepSeek 基于上下文生成
 - `reject`：相似度太低，拒绝回答
+
+### 流式接口示例
+
+```bash
+curl -N -X POST http://localhost:8082/v1/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question":"什么是应有成本"}'
+```
+
+SSE 事件格式：
+
+```
+data: {"type": "start"}
+
+data: {"type": "chunk", "content": "应有成本"}
+
+data: {"type": "chunk", "content": "是指..."}
+
+data: {"type": "done", "source": "faq", "answer": "应有成本是指...", "confidence": 0.95}
+```
+
+前端接入示例：
+
+```javascript
+// 使用 fetch + ReadableStream 接收 SSE（推荐）
+const response = await fetch('/v1/chat/stream', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ question: '什么是应有成本' })
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  const text = decoder.decode(value);
+  // 解析 data: {...} 行
+  console.log(text);
+}
+```
 
 ## 🧪 测试
 
@@ -383,7 +426,7 @@ curl http://localhost:8082/v1/chat/history/$SESSION_ID
 - [x] 文档知识库（PDF/Word 自动解析）
 - [x] 重排序 + 混合检索
 - [x] 多轮对话上下文
-- [ ] 流式输出（SSE 打字机效果）
+- [x] 流式输出（SSE 打字机效果）
 - [ ] 用户反馈收集（👍/👎）
 - [ ] 对话历史记录与分析看板
 

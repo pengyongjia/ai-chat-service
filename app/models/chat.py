@@ -33,6 +33,35 @@ class ChatResponse(BaseModel):
     session_id: str | None = Field(default=None, description="会话 ID")
 
 
+class ChatStreamRequest(BaseModel):
+    """流式聊天请求"""
+
+    question: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="用户问题",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description="会话 ID（可选，用于多轮对话）",
+    )
+
+
+class ChatStreamEvent(BaseModel):
+    """SSE 流式事件"""
+
+    type: str = Field(..., description="事件类型：start / chunk / done / error")
+    content: str | None = Field(default=None, description="文本片段内容")
+    answer: str | None = Field(default=None, description="完整回答（done 事件）")
+    source: str | None = Field(default=None, description="回答来源（done 事件）")
+    confidence: float | None = Field(default=None, description="置信度（done 事件）")
+    matched_question: str | None = Field(default="", description="匹配到的问题（done 事件）")
+    references: list | None = Field(default_factory=list, description="参考来源（done 事件）")
+    message: str | None = Field(default=None, description="错误信息（error 事件）")
+    code: str | None = Field(default=None, description="错误码（error 事件）")
+
+
 class ChatMessage(BaseModel):
     """单条聊天消息"""
 

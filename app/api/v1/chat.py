@@ -3,18 +3,27 @@
 """
 
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 
 from app.core.exceptions import AppException
 from app.core.logging import log
 from app.core.responses import error_response, success_response
 from app.models.chat import (
     ChatRequest,
+    ChatStreamRequest,
     SessionClearRequest,
 )
 from app.services.chat_service import chat_service
 from app.services.conversation_service import conversation_service
 
 router = APIRouter(prefix="/chat", tags=["对话"])
+
+
+def _format_sse(data: dict) -> str:
+    """将事件字典格式化为 SSE 消息"""
+    import json
+
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 @router.post("/ask")
@@ -32,6 +41,36 @@ async def ask(request: ChatRequest):
     except Exception:
         log.exception("问答服务异常")
         return error_response(message="服务暂时不可用，请稍后重试", code=500)
+
+
+@router.post("/stream")
+async def stream(request: ChatStreamRequest):
+    """用户提问流式接口（SSE 打字机效果）"""
+
+    async def event_generator():
+        try:
+            for event in chat_service.answer_stream(
+                request.question, session_id=request.session_id
+            ):
+                yield _format_sse(event)
+        except AppException as e:
+            log.error(f"流式业务异常: {e.message}")
+            yield _format_sse({"type": "error", "message": e.message, "code": e.code})
+        except Exception:
+            log.exception("流式问答服务异常")
+            yield _format_sse(
+                {"type": "error", "message": "服务暂时不可用，请稍后重试", "code": "INTERNAL_ERROR"}
+            )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/sessions")
