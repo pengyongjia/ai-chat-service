@@ -22,7 +22,7 @@ async def ask(request: ChatRequest):
     except AppException as e:
         log.error(f"业务异常: {e.message}")
         return error_response(message=e.message, code=400)
-    except Exception as e:
+    except Exception:
         log.exception("问答服务异常")
         return error_response(message="服务暂时不可用，请稍后重试", code=500)
 

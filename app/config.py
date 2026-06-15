@@ -40,6 +40,21 @@ class Config:
     FAQ_THRESHOLD_LOW: float = field(default=0.40)
     FAQ_TOP_K: int = field(default=3)
 
+    # 第三阶段：检索优化开关
+    ENABLE_RERANK: bool = field(default=True)
+    ENABLE_HYBRID_SEARCH: bool = field(default=True)
+    ENABLE_QUERY_REWRITE: bool = field(default=False)
+    ENABLE_LLM_CONTEXT_COMPRESS: bool = field(default=False)
+
+    # 重排序权重
+    RERANK_VECTOR_WEIGHT: float = field(default=0.6)
+    RERANK_KEYWORD_WEIGHT: float = field(default=0.3)
+    RERANK_LENGTH_WEIGHT: float = field(default=0.1)
+
+    # 上下文压缩参数
+    CONTEXT_SIMILARITY_THRESHOLD: float = field(default=0.35)
+    CONTEXT_MAX_CHUNK_LENGTH: int = field(default=600)
+
     # 应用配置
     APP_NAME: str = field(default="应有成本估算 AI 助手")
     APP_VERSION: str = field(default="0.1.0")

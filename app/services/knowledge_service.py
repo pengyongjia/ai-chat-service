@@ -8,12 +8,10 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from app.config import config
 from app.core.document_loader import DocumentLoaderError, document_loader
-from app.core.exceptions import VectorStoreError
 from app.core.logging import log
 from app.core.text_splitter import text_splitter
-from app.db.vector_store import Chunk, vector_store
+from app.db.vector_store import vector_store
 
 # 上传文件保存目录
 UPLOAD_DIR = Path("knowledge/uploads")

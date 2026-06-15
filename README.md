@@ -11,6 +11,7 @@
 - 🧠 **语义理解**：基于 BGE Embedding，换种说法也能匹配到正确答案
 - 🛡️ **防幻觉设计**：三级兜底策略（直接命中 / LLM 生成 / 拒绝回答）
 - 📄 **文档 RAG**：支持 PDF / Word / Excel / Markdown / TXT 自动解析入库
+- 🔍 **检索优化**：混合检索（向量 + BM25）+ 重排序 + 查询重写 + 上下文压缩
 - 💰 **成本极低**：80% 问题直接命中 FAQ，零 LLM 调用成本
 - 📦 **开箱即用**：300 行代码，JSON 维护知识库，无需数据库
 - 🔌 **多模型支持**：DeepSeek + SiliconFlow / OpenAI / Azure OpenAI 兼容接口
@@ -76,9 +77,13 @@ ai-chat-service/
 │   │       ├── faq.py           # FAQ 管理接口
 │   │       └── knowledge.py     # 知识库管理接口
 │   ├── core/
+│   │   ├── context_compressor.py # 上下文压缩
 │   │   ├── document_loader.py   # 多格式文档加载
 │   │   ├── exceptions.py        # 自定义异常
+│   │   ├── hybrid_searcher.py   # 混合检索（向量 + BM25）
 │   │   ├── logging.py           # 结构化日志
+│   │   ├── query_rewriter.py    # 查询重写
+│   │   ├── reranker.py          # 检索结果重排序
 │   │   ├── responses.py         # 统一响应格式
 │   │   └── text_splitter.py     # 文本切分
 │   ├── models/
@@ -89,7 +94,8 @@ ai-chat-service/
 │   ├── services/
 │   │   ├── chat_service.py      # 聊天业务逻辑
 │   │   ├── faq_service.py       # FAQ 业务逻辑
-│   │   └── knowledge_service.py # 知识库业务逻辑
+│   │   ├── knowledge_service.py # 知识库业务逻辑
+│   │   └── llm_client.py        # LLM 客户端封装
 │   └── db/
 │       └── vector_store.py      # 向量存储（Local / API 两种后端）
 ├── knowledge/
@@ -99,7 +105,12 @@ ai-chat-service/
 ├── tests/                       # 单元测试
 │   ├── conftest.py
 │   ├── test_chat.py
-│   └── test_faq.py
+│   ├── test_context_compressor.py
+│   ├── test_faq.py
+│   ├── test_hybrid_search.py
+│   ├── test_knowledge.py
+│   ├── test_query_rewriter.py
+│   └── test_reranker.py
 ├── .env.example                 # 环境变量模板
 ├── .gitignore                   # Git 忽略规则
 ├── Dockerfile                   # Docker 镜像
@@ -127,6 +138,15 @@ ai-chat-service/
 | `FAQ_THRESHOLD_HIGH` | — | `0.75` | 高置信阈值（≥此值直接返回答案） |
 | `FAQ_THRESHOLD_LOW` | — | `0.40` | 低置信阈值（<此值直接拒绝） |
 | `FAQ_TOP_K` | — | `3` | 检索时返回的最相似 FAQ 数量 |
+| `ENABLE_RERANK` | — | `true` | 是否启用重排序 |
+| `ENABLE_HYBRID_SEARCH` | — | `true` | 是否启用混合检索（向量 + BM25） |
+| `ENABLE_QUERY_REWRITE` | — | `false` | 是否启用查询重写（会调用 LLM） |
+| `ENABLE_LLM_CONTEXT_COMPRESS` | — | `false` | 是否启用 LLM 上下文压缩（会调用 LLM） |
+| `RERANK_VECTOR_WEIGHT` | — | `0.6` | 重排序向量相似度权重 |
+| `RERANK_KEYWORD_WEIGHT` | — | `0.3` | 重排序关键词权重 |
+| `RERANK_LENGTH_WEIGHT` | — | `0.1` | 重排序长度权重（三项和为 1.0） |
+| `CONTEXT_SIMILARITY_THRESHOLD` | — | `0.35` | 上下文压缩相似度阈值 |
+| `CONTEXT_MAX_CHUNK_LENGTH` | — | `600` | 单 chunk 最大长度 |
 | `LOG_LEVEL` | — | `INFO` | 日志级别：DEBUG/INFO/WARNING/ERROR |
 
 ### ⚠️ 重要安全提示
@@ -140,9 +160,15 @@ ai-chat-service/
 ```
 用户提问
     ↓
-① Embedding → 语义检索 Top-3 FAQ
+① 查询重写（可选）→ 把口语化问题标准化
     ↓
-② 判断相似度：
+② 混合检索 → 向量语义检索 + BM25 关键词检索，RRF 融合
+    ↓
+③ 重排序 → 综合向量相似度、关键词匹配、FAQ 权重再精排
+    ↓
+④ 上下文压缩 → 过滤低相关 chunk，控制 LLM 上下文长度
+    ↓
+⑤ 判断相似度：
     ├─ ≥ 0.75 → 直接返回答案 (source: faq)          💰 成本：0
     ├─ 0.40~0.75 → DeepSeek 基于上下文生成 (source: llm)  💰 成本：~0.01元
     └─ < 0.40 → 拒绝回答，引导人工 (source: reject)   💰 成本：0
@@ -284,18 +310,34 @@ Embedding API 生成向量
     ↓
 ChromaDB 存储
     ↓
-用户提问时语义检索 Top-K chunks
+用户提问 → 查询重写 → 混合检索 → 重排序 → 上下文压缩
     ↓
 LLM 基于上下文生成回答
+```
+
+### 检索优化说明
+
+| 优化模块 | 作用 | 默认状态 | 成本影响 |
+|----------|------|----------|----------|
+| **混合检索** | 向量检索 + BM25 关键词检索互补，提升专业术语召回 | 开启 | 无额外成本 |
+| **重排序** | 综合语义、关键词、长度、FAQ 权重精排 Top-K | 开启 | 无额外成本 |
+| **查询重写** | 把口语化问题改写为标准查询，提高检索准确率 | 关闭 | 每次查询多调 1 次 LLM |
+| **上下文压缩** | 过滤/摘要低相关 chunks，提升 LLM 生成质量 | 关闭 | 仅对长 chunk 调 LLM |
+
+**本地效果测试**：
+
+```bash
+# 配置真实 API Key 后运行
+python scripts/test_phase3.py
 ```
 
 ## 🛣️ 升级路线
 
 - [x] 文档知识库（PDF/Word 自动解析）
+- [x] 重排序 + 混合检索
 - [ ] 流式输出（SSE 打字机效果）
 - [ ] 多轮对话上下文
 - [ ] 用户反馈收集（👍/👎）
-- [ ] 重排序 + 混合检索
 - [ ] 对话历史记录与分析看板
 
 ## 📄 License

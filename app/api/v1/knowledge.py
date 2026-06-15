@@ -6,7 +6,7 @@
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.core.logging import log
-from app.core.responses import error_response, success_response
+from app.core.responses import success_response
 from app.models.knowledge import KnowledgeDeleteRequest
 from app.services.knowledge_service import knowledge_service
 

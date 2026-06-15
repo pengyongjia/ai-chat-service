@@ -2,8 +2,6 @@
 知识库接口测试
 """
 
-from pathlib import Path
-
 import pytest
 
 

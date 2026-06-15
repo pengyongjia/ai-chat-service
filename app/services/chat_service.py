@@ -1,14 +1,17 @@
 """
 聊天服务层
 实现 RAG 三级兜底策略，支持 FAQ + 文档 chunks 混合检索
+集成第三阶段检索优化：查询重写、混合检索、重排序、上下文压缩
 """
 
-from openai import OpenAI
-
 from app.config import config
+from app.core.context_compressor import context_compressor
 from app.core.exceptions import LLMError
 from app.core.logging import log
+from app.core.query_rewriter import query_rewriter
+from app.core.reranker import reranker
 from app.db.vector_store import vector_store
+from app.services.llm_client import llm_client
 
 
 class ChatService:
@@ -17,39 +20,50 @@ class ChatService:
     # 最大上下文长度（字符数）
     MAX_CONTEXT_LENGTH = 2500
 
-    def __init__(self):
-        self._client = None
-
-    @property
-    def client(self):
-        """延迟初始化 OpenAI 客户端"""
-        if self._client is None:
-            self._client = OpenAI(
-                api_key=config.DEEPSEEK_API_KEY,
-                base_url=config.DEEPSEEK_BASE_URL,
-            )
-        return self._client
-
     def answer(self, question: str) -> dict:
         """
         用户提问主流程
         """
         log.info(f"收到用户提问: {question[:50]}...")
 
-        # 1. 检索 Top-K 相关知识（FAQ + 文档 chunks）
+        # 1. 查询重写（可选）
+        search_query = question
+        if config.ENABLE_QUERY_REWRITE:
+            search_query = query_rewriter.rewrite(question)
+            if search_query != question:
+                log.info(f"使用改写后查询: {search_query[:50]}...")
+
+        # 2. 混合检索 Top-K 相关知识（FAQ + 文档 chunks）
         results = vector_store.search(
-            question,
-            top_k=config.FAQ_TOP_K + 3,  # 多检索一些，后续合并处理
+            search_query,
+            top_k=config.FAQ_TOP_K + 3,
             doc_types=["faq", "document"],
+            hybrid=config.ENABLE_HYBRID_SEARCH,
         )
 
-        # 2. 解析结果
+        # 3. 解析结果
         matches = self._parse_results(results)
 
         if not matches:
-            return self._reject(question="", confidence=0.0)
+            return self._reject(question=search_query, confidence=0.0)
 
-        # 3. 高置信命中 FAQ → 直接回答
+        # 4. 重排序（可选）
+        if config.ENABLE_RERANK:
+            ranked = reranker.rerank(search_query, matches, top_k=len(matches))
+            matches = self._ranked_to_matches(ranked)
+
+        # 5. 上下文压缩（可选）
+        if matches:
+            matches = context_compressor.compress(
+                search_query,
+                matches,
+                max_total_length=self.MAX_CONTEXT_LENGTH,
+            )
+
+        if not matches:
+            return self._reject(question=search_query, confidence=0.0)
+
+        # 6. 高置信命中 FAQ → 直接回答
         top_match = matches[0]
         if top_match["doc_type"] == "faq" and top_match["similarity"] >= config.FAQ_THRESHOLD_HIGH:
             log.info(f"直接命中 FAQ，相似度: {top_match['similarity']}")
@@ -61,7 +75,7 @@ class ChatService:
                 "references": [],
             }
 
-        # 4. 不相关 → 直接拒绝，避免幻觉
+        # 7. 不相关 → 直接拒绝，避免幻觉
         if top_match["similarity"] < config.FAQ_THRESHOLD_LOW:
             log.info(f"相似度过低，拒绝回答: {top_match['similarity']}")
             return self._reject(
@@ -69,7 +83,7 @@ class ChatService:
                 confidence=top_match["similarity"],
             )
 
-        # 5. 半相关 → 基于检索到的知识生成回答
+        # 8. 半相关 → 基于检索到的知识生成回答
         return self._generate_by_llm(question, matches)
 
     def _parse_results(self, results: dict) -> list[dict]:
@@ -100,6 +114,23 @@ class ChatService:
         matches.sort(key=lambda x: x["similarity"], reverse=True)
         return matches
 
+    def _ranked_to_matches(self, ranked: list) -> list[dict]:
+        """将重排序器输出转换为统一 match 格式"""
+        matches = []
+        for item in ranked:
+            matches.append(
+                {
+                    "text": item.text,
+                    "answer": item.answer,
+                    "source": item.source,
+                    "doc_type": item.doc_type,
+                    "chunk_index": item.chunk_index,
+                    "similarity": item.final_score,
+                    "metadata": item.metadata or {},
+                }
+            )
+        return matches
+
     def _generate_by_llm(self, question: str, matches: list[dict]) -> dict:
         """基于上下文调用 LLM 生成回答"""
         # 构建上下文，控制长度
@@ -122,17 +153,12 @@ class ChatService:
 """
 
         try:
-            response = self.client.chat.completions.create(
-                model=config.DEEPSEEK_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": question},
-                ],
+            answer = llm_client.complete(
+                prompt=question,
+                system_prompt=system_prompt,
                 temperature=0.3,
                 max_tokens=600,
             )
-
-            answer = response.choices[0].message.content
             log.info("LLM 基于知识库生成回答完成")
 
             return {

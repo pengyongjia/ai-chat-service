@@ -18,6 +18,7 @@ from openai import OpenAI
 
 from app.config import config
 from app.core.exceptions import VectorStoreError
+from app.core.hybrid_searcher import SearchCandidate, hybrid_searcher
 from app.core.logging import log
 
 
@@ -68,7 +69,9 @@ class LocalVectorStore:
     def _similarity(self, a: str, b: str) -> float:
         return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
-    def search(self, query: str, top_k: int = 5, doc_types: list[str] | None = None):
+    def search(
+        self, query: str, top_k: int = 5, doc_types: list[str] | None = None, hybrid: bool = False
+    ):
         """
         本地字符串匹配检索
 
@@ -76,6 +79,7 @@ class LocalVectorStore:
             query: 查询文本
             top_k: 返回最相似的结果数量
             doc_types: 限制检索的文档类型，如 ["faq", "document"]
+            hybrid: 是否启用混合检索（BM25 + 向量/字符串匹配融合）
         """
         items = self.items
         if doc_types:
@@ -92,12 +96,54 @@ class LocalVectorStore:
             scored.append((score, item))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        top = scored[:top_k]
+        vector_top_k = top_k * 4 if hybrid else top_k
+        top = scored[:vector_top_k]
 
+        vector_results = [
+            {
+                "text": s[1]["text"],
+                "answer": s[1].get("answer", ""),
+                "source": s[1]["source"],
+                "doc_type": s[1]["doc_type"],
+                "chunk_index": s[1].get("chunk_index", 0),
+                "similarity": s[0],
+                "metadata": s[1].get("metadata", {}),
+            }
+            for s in top
+        ]
+
+        if not hybrid:
+            return self._pack_results(vector_results[:top_k])
+
+        # 混合检索
+        all_candidates = [
+            SearchCandidate(
+                text=item["text"],
+                source=item["source"],
+                doc_type=item["doc_type"],
+                chunk_index=item.get("chunk_index", 0),
+                answer=item.get("answer", ""),
+                metadata=item.get("metadata", {}),
+            )
+            for item in items
+        ]
+
+        fused = hybrid_searcher.search(
+            query=query,
+            vector_results=vector_results,
+            documents=all_candidates,
+            vector_top_k=vector_top_k,
+            keyword_top_k=top_k * 4,
+            final_top_k=top_k,
+        )
+        return self._pack_results(fused)
+
+    def _pack_results(self, candidates: list[dict]) -> dict:
+        """将统一格式的候选结果打包成 ChromaDB 返回格式"""
         return {
-            "distances": [[1 - s[0] for s in top]],
-            "metadatas": [[self._build_metadata(s[1]) for s in top]],
-            "documents": [[s[1]["text"] for s in top]],
+            "distances": [[1 - c.get("similarity", 0.0) for c in candidates]],
+            "metadatas": [[self._build_metadata(c) for c in candidates]],
+            "documents": [[c.get("text", "") for c in candidates]],
         }
 
     def _build_metadata(self, item: dict) -> dict:
@@ -212,7 +258,9 @@ class APIEmbeddingStore:
             ids=ids,
         )
 
-    def search(self, query: str, top_k: int = 5, doc_types: list[str] | None = None):
+    def search(
+        self, query: str, top_k: int = 5, doc_types: list[str] | None = None, hybrid: bool = False
+    ):
         try:
             embedding = self._get_embedding(query)
 
@@ -223,15 +271,78 @@ class APIEmbeddingStore:
                 else:
                     where_filter = {"doc_type": {"$in": doc_types}}
 
-            return self.collection.query(
+            vector_top_k = top_k * 4 if hybrid else top_k
+
+            raw = self.collection.query(
                 query_embeddings=[embedding],
-                n_results=top_k,
+                n_results=vector_top_k,
                 where=where_filter,
                 include=["metadatas", "distances", "documents"],
             )
+
+            vector_results = self._parse_raw_results(raw)
+
+            if not hybrid:
+                return self._pack_results(vector_results[:top_k])
+
+            # 混合检索：获取全部候选构建 BM25 索引
+            all_data = self.collection.get(
+                where=where_filter,
+                include=["documents", "metadatas"],
+            )
+            all_candidates = [
+                SearchCandidate(
+                    text=doc,
+                    source=meta.get("source", ""),
+                    doc_type=meta.get("doc_type", "document"),
+                    chunk_index=meta.get("chunk_index", 0),
+                    answer=meta.get("answer", ""),
+                    metadata=meta,
+                )
+                for doc, meta in zip(all_data["documents"], all_data["metadatas"])
+            ]
+
+            fused = hybrid_searcher.search(
+                query=query,
+                vector_results=vector_results,
+                documents=all_candidates,
+                vector_top_k=vector_top_k,
+                keyword_top_k=top_k * 4,
+                final_top_k=top_k,
+            )
+            return self._pack_results(fused)
         except Exception as e:
             log.error(f"向量检索失败: {e}")
             raise VectorStoreError(f"向量检索失败: {e}")
+
+    def _parse_raw_results(self, raw: dict) -> list[dict]:
+        """解析 ChromaDB 原始返回为统一格式"""
+        results = []
+        if not raw.get("distances") or not raw["distances"][0]:
+            return results
+
+        for i in range(len(raw["distances"][0])):
+            metadata = raw["metadatas"][0][i]
+            results.append(
+                {
+                    "text": metadata.get("text", ""),
+                    "answer": metadata.get("answer", ""),
+                    "source": metadata.get("source", ""),
+                    "doc_type": metadata.get("doc_type", "document"),
+                    "chunk_index": metadata.get("chunk_index", 0),
+                    "similarity": 1 - raw["distances"][0][i],
+                    "metadata": metadata,
+                }
+            )
+        return results
+
+    def _pack_results(self, candidates: list[dict]) -> dict:
+        """将统一格式的候选结果打包成 ChromaDB 返回格式"""
+        return {
+            "distances": [[1 - c.get("similarity", 0.0) for c in candidates]],
+            "metadatas": [[c for c in candidates]],
+            "documents": [[c.get("text", "") for c in candidates]],
+        }
 
     def clear(self, doc_type: str | None = None):
         try:

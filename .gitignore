@@ -53,3 +53,7 @@ Thumbs.db
 knowledge/uploads/
 knowledge/documents.json
 chroma_db_test/
+
+# 设计文档与配图素材（不提交到 Git）
+docs/
+*.md~backup
