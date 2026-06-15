@@ -54,6 +54,10 @@ knowledge/uploads/
 knowledge/documents.json
 chroma_db_test/
 
+# 会话数据（运行时自动生成）
+conversations/
+conversations_test/
+
 # 设计文档与配图素材（不提交到 Git）
 docs/
 *.md~backup

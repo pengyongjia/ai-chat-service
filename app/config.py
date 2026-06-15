@@ -55,6 +55,12 @@ class Config:
     CONTEXT_SIMILARITY_THRESHOLD: float = field(default=0.35)
     CONTEXT_MAX_CHUNK_LENGTH: int = field(default=600)
 
+    # 第四阶段：多轮对话配置
+    ENABLE_CONVERSATION: bool = field(default=True)
+    CONVERSATION_PERSIST_DIR: str = field(default="./conversations")
+    SESSION_MAX_HISTORY: int = field(default=10)
+    SESSION_TTL_SECONDS: int = field(default=86400)  # 24 小时
+
     # 应用配置
     APP_NAME: str = field(default="应有成本估算 AI 助手")
     APP_VERSION: str = field(default="0.1.0")

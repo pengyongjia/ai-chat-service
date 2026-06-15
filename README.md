@@ -12,6 +12,7 @@
 - 🛡️ **防幻觉设计**：三级兜底策略（直接命中 / LLM 生成 / 拒绝回答）
 - 📄 **文档 RAG**：支持 PDF / Word / Excel / Markdown / TXT 自动解析入库
 - 🔍 **检索优化**：混合检索（向量 + BM25）+ 重排序 + 查询重写 + 上下文压缩
+- 💬 **多轮对话**：支持 session 上下文，可追问和指代消解
 - 💰 **成本极低**：80% 问题直接命中 FAQ，零 LLM 调用成本
 - 📦 **开箱即用**：300 行代码，JSON 维护知识库，无需数据库
 - 🔌 **多模型支持**：DeepSeek + SiliconFlow / OpenAI / Azure OpenAI 兼容接口
@@ -93,11 +94,13 @@ ai-chat-service/
 │   │   └── knowledge.py         # 知识库模型
 │   ├── services/
 │   │   ├── chat_service.py      # 聊天业务逻辑
+│   │   ├── conversation_service.py # 多轮对话业务逻辑
 │   │   ├── faq_service.py       # FAQ 业务逻辑
 │   │   ├── knowledge_service.py # 知识库业务逻辑
 │   │   └── llm_client.py        # LLM 客户端封装
-│   └── db/
-│       └── vector_store.py      # 向量存储（Local / API 两种后端）
+│   ├── db/
+│   │   ├── conversation_store.py # 会话存储（内存 + JSON 持久化）
+│   │   └── vector_store.py      # 向量存储（Local / API 两种后端）
 ├── knowledge/
 │   └── faq.json                 # FAQ 知识库（人工维护）
 ├── scripts/
@@ -106,6 +109,7 @@ ai-chat-service/
 │   ├── conftest.py
 │   ├── test_chat.py
 │   ├── test_context_compressor.py
+│   ├── test_conversation.py
 │   ├── test_faq.py
 │   ├── test_hybrid_search.py
 │   ├── test_knowledge.py
@@ -147,6 +151,10 @@ ai-chat-service/
 | `RERANK_LENGTH_WEIGHT` | — | `0.1` | 重排序长度权重（三项和为 1.0） |
 | `CONTEXT_SIMILARITY_THRESHOLD` | — | `0.35` | 上下文压缩相似度阈值 |
 | `CONTEXT_MAX_CHUNK_LENGTH` | — | `600` | 单 chunk 最大长度 |
+| `ENABLE_CONVERSATION` | — | `true` | 是否启用多轮对话 |
+| `CONVERSATION_PERSIST_DIR` | — | `./conversations` | 会话数据持久化目录 |
+| `SESSION_MAX_HISTORY` | — | `10` | 保留的最大历史轮数 |
+| `SESSION_TTL_SECONDS` | — | `86400` | 会话过期时间（秒） |
 | `LOG_LEVEL` | — | `INFO` | 日志级别：DEBUG/INFO/WARNING/ERROR |
 
 ### ⚠️ 重要安全提示
@@ -187,7 +195,12 @@ ai-chat-service/
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
-| `POST /v1/chat/ask` | 提问 | 核心接口，传入问题返回答案 |
+| `POST /v1/chat/ask` | 提问 | 核心接口，传入问题返回答案，支持 `session_id` |
+| `POST /v1/chat/sessions` | 创建会话 | 创建新会话，返回 `session_id` |
+| `GET /v1/chat/sessions` | 会话列表 | 查看所有活跃会话 |
+| `GET /v1/chat/history/{session_id}` | 获取历史 | 查看会话的聊天历史 |
+| `POST /v1/chat/clear` | 清空会话 | 清空指定会话的历史 |
+| `DELETE /v1/chat/sessions/{session_id}` | 删除会话 | 删除指定会话 |
 | `GET /health` | 健康检查 | 基础健康状态 |
 | `GET /health/ready` | 就绪检查 | 包含依赖组件状态 |
 | `POST /v1/faq/seed` | 批量导入 | 清空并重新导入 FAQ（初始化用） |
@@ -331,12 +344,46 @@ LLM 基于上下文生成回答
 python scripts/test_phase3.py
 ```
 
+### 多轮对话
+
+服务支持基于 `session_id` 的多轮对话：
+
+1. 创建会话获取 `session_id`
+2. 每次提问带上 `session_id`
+3. 系统会自动维护历史上下文
+
+```bash
+# 1. 创建会话
+SESSION_ID=$(curl -s -X POST http://localhost:8082/v1/chat/sessions | jq -r '.data.session_id')
+
+# 2. 第一轮提问
+curl -X POST http://localhost:8082/v1/chat/ask \
+  -H "Content-Type: application/json" \
+  -d "{\"question\":\"什么是应有成本\",\"session_id\":\"$SESSION_ID\"}"
+
+# 3. 第二轮追问（系统知道"它"指代"应有成本"）
+curl -X POST http://localhost:8082/v1/chat/ask \
+  -H "Content-Type: application/json" \
+  -d "{\"question\":\"它适用于哪些行业\",\"session_id\":\"$SESSION_ID\"}"
+
+# 4. 查看历史
+curl http://localhost:8082/v1/chat/history/$SESSION_ID
+```
+
+**会话管理**：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `ENABLE_CONVERSATION` | `true` | 多轮对话开关 |
+| `SESSION_MAX_HISTORY` | `10` | 保留最近 10 轮对话 |
+| `SESSION_TTL_SECONDS` | `86400` | 会话 24 小时无活动自动清理 |
+
 ## 🛣️ 升级路线
 
 - [x] 文档知识库（PDF/Word 自动解析）
 - [x] 重排序 + 混合检索
+- [x] 多轮对话上下文
 - [ ] 流式输出（SSE 打字机效果）
-- [ ] 多轮对话上下文
 - [ ] 用户反馈收集（👍/👎）
 - [ ] 对话历史记录与分析看板
 

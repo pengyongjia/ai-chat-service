@@ -11,6 +11,7 @@ from app.core.logging import log
 from app.core.query_rewriter import query_rewriter
 from app.core.reranker import reranker
 from app.db.vector_store import vector_store
+from app.services.conversation_service import conversation_service
 from app.services.llm_client import llm_client
 
 
@@ -20,11 +21,19 @@ class ChatService:
     # 最大上下文长度（字符数）
     MAX_CONTEXT_LENGTH = 2500
 
-    def answer(self, question: str) -> dict:
+    def answer(self, question: str, session_id: str | None = None) -> dict:
         """
         用户提问主流程
+
+        Args:
+            question: 用户问题
+            session_id: 会话 ID（可选），用于多轮对话上下文
         """
         log.info(f"收到用户提问: {question[:50]}...")
+
+        # 0. 保存用户问题到会话
+        if session_id and config.ENABLE_CONVERSATION:
+            conversation_service.add_user_message(session_id, question)
 
         # 1. 查询重写（可选）
         search_query = question
@@ -45,7 +54,9 @@ class ChatService:
         matches = self._parse_results(results)
 
         if not matches:
-            return self._reject(question=search_query, confidence=0.0)
+            result = self._reject(question=search_query, confidence=0.0)
+            self._save_to_session(session_id, result)
+            return result
 
         # 4. 重排序（可选）
         if config.ENABLE_RERANK:
@@ -61,30 +72,43 @@ class ChatService:
             )
 
         if not matches:
-            return self._reject(question=search_query, confidence=0.0)
+            result = self._reject(question=search_query, confidence=0.0)
+            self._save_to_session(session_id, result)
+            return result
 
         # 6. 高置信命中 FAQ → 直接回答
         top_match = matches[0]
         if top_match["doc_type"] == "faq" and top_match["similarity"] >= config.FAQ_THRESHOLD_HIGH:
             log.info(f"直接命中 FAQ，相似度: {top_match['similarity']}")
-            return {
+            result = {
                 "source": "faq",
                 "answer": top_match["answer"],
                 "matched_question": top_match["text"],
                 "confidence": top_match["similarity"],
                 "references": [],
             }
+            self._save_to_session(session_id, result)
+            return result
 
         # 7. 不相关 → 直接拒绝，避免幻觉
         if top_match["similarity"] < config.FAQ_THRESHOLD_LOW:
             log.info(f"相似度过低，拒绝回答: {top_match['similarity']}")
-            return self._reject(
+            result = self._reject(
                 question=top_match["text"],
                 confidence=top_match["similarity"],
             )
+            self._save_to_session(session_id, result)
+            return result
 
         # 8. 半相关 → 基于检索到的知识生成回答
-        return self._generate_by_llm(question, matches)
+        result = self._generate_by_llm(question, matches, session_id)
+        self._save_to_session(session_id, result)
+        return result
+
+    def _save_to_session(self, session_id: str | None, result: dict):
+        """保存回答到会话"""
+        if session_id and config.ENABLE_CONVERSATION:
+            conversation_service.add_assistant_message(session_id, result["answer"])
 
     def _parse_results(self, results: dict) -> list[dict]:
         """解析向量检索结果，统一格式"""
@@ -131,7 +155,9 @@ class ChatService:
             )
         return matches
 
-    def _generate_by_llm(self, question: str, matches: list[dict]) -> dict:
+    def _generate_by_llm(
+        self, question: str, matches: list[dict], session_id: str | None = None
+    ) -> dict:
         """基于上下文调用 LLM 生成回答"""
         # 构建上下文，控制长度
         context_blocks, references = self._build_context(matches)
@@ -153,9 +179,15 @@ class ChatService:
 """
 
         try:
-            answer = llm_client.complete(
-                prompt=question,
+            messages = conversation_service.build_llm_messages(
                 system_prompt=system_prompt,
+                question=question,
+                session_id=session_id,
+            )
+            answer = llm_client.complete(
+                prompt="",  # messages 已包含 system 和 user
+                system_prompt=None,
+                messages=messages,
                 temperature=0.3,
                 max_tokens=600,
             )

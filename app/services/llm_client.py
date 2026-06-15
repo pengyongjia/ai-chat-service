@@ -35,8 +35,9 @@ class LLMClient:
 
     def complete(
         self,
-        prompt: str,
+        prompt: str = "",
         system_prompt: str | None = None,
+        messages: list[dict] | None = None,
         temperature: float = 0.3,
         max_tokens: int = 500,
     ) -> str:
@@ -44,18 +45,24 @@ class LLMClient:
         调用 LLM 获取文本补全
 
         Args:
-            prompt: 用户提示词
+            prompt: 用户提示词（与 messages 二选一）
             system_prompt: 可选的系统提示词
+            messages: 完整的 OpenAI 格式消息列表（与 prompt 二选一）
             temperature: 采样温度
             max_tokens: 最大生成 token 数
 
         Returns:
             生成的文本内容
         """
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+        if messages is None:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            if prompt:
+                messages.append({"role": "user", "content": prompt})
+
+        if not messages:
+            raise LLMError("messages 或 prompt 至少提供一个")
 
         try:
             response = self.client.chat.completions.create(
