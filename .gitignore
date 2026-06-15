@@ -43,6 +43,7 @@ chroma_db/
 
 # 日志文件
 *.log
+logs/
 
 # 操作系统
 .DS_Store
