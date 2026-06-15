@@ -1,6 +1,7 @@
 # Web 框架
 fastapi>=0.109
 uvicorn[standard]>=0.27
+python-multipart>=0.0.5  # 文件上传依赖
 
 # 向量数据库
 chromadb>=0.4.22
@@ -26,6 +27,14 @@ httpx>=0.27
 black>=24.0
 isort>=5.13
 flake8>=7.0
+
+# 文档处理（PDF / Word / Excel / CSV）
+pandas>=2.0
+pypdf>=5.0          # PDF 解析（默认，纯 Python，兼容性好）
+python-docx>=1.1.0
+
+# 可选：更高效的 PDF 解析（需要系统依赖，部分 Python 版本可能不支持）
+# PyMuPDF>=1.23.0
 
 # 可选：本地 Embedding 模型
 sentence-transformers>=2.3

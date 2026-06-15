@@ -10,6 +10,7 @@
 
 - 🧠 **语义理解**：基于 BGE Embedding，换种说法也能匹配到正确答案
 - 🛡️ **防幻觉设计**：三级兜底策略（直接命中 / LLM 生成 / 拒绝回答）
+- 📄 **文档 RAG**：支持 PDF / Word / Excel / Markdown / TXT 自动解析入库
 - 💰 **成本极低**：80% 问题直接命中 FAQ，零 LLM 调用成本
 - 📦 **开箱即用**：300 行代码，JSON 维护知识库，无需数据库
 - 🔌 **多模型支持**：DeepSeek + SiliconFlow / OpenAI / Azure OpenAI 兼容接口
@@ -72,18 +73,23 @@ ai-chat-service/
 │   │   ├── health.py            # 健康检查接口
 │   │   └── v1/
 │   │       ├── chat.py          # 对话接口
-│   │       └── faq.py           # FAQ 管理接口
+│   │       ├── faq.py           # FAQ 管理接口
+│   │       └── knowledge.py     # 知识库管理接口
 │   ├── core/
+│   │   ├── document_loader.py   # 多格式文档加载
 │   │   ├── exceptions.py        # 自定义异常
+│   │   ├── logging.py           # 结构化日志
 │   │   ├── responses.py         # 统一响应格式
-│   │   └── logging.py           # 结构化日志
+│   │   └── text_splitter.py     # 文本切分
 │   ├── models/
 │   │   ├── chat.py              # 聊天请求/响应模型
+│   │   ├── common.py            # 通用模型
 │   │   ├── faq.py               # FAQ 模型
-│   │   └── common.py            # 通用模型
+│   │   └── knowledge.py         # 知识库模型
 │   ├── services/
 │   │   ├── chat_service.py      # 聊天业务逻辑
-│   │   └── faq_service.py       # FAQ 业务逻辑
+│   │   ├── faq_service.py       # FAQ 业务逻辑
+│   │   └── knowledge_service.py # 知识库业务逻辑
 │   └── db/
 │       └── vector_store.py      # 向量存储（Local / API 两种后端）
 ├── knowledge/
@@ -162,6 +168,11 @@ ai-chat-service/
 | `POST /v1/faq/add` | 单条添加 | 热更新，不重启服务 |
 | `GET /v1/faq/count` | 数量查询 | 查看当前 FAQ 总数 |
 | `POST /v1/faq/clear` | 清空 | 清空向量库 |
+| `POST /v1/knowledge/upload` | 上传文档 | 上传 PDF/Word/Excel/MD/TXT 到知识库 |
+| `GET /v1/knowledge/list` | 文档列表 | 列出已上传文档 |
+| `GET /v1/knowledge/stats` | 知识库统计 | 查看 FAQ/文档数量 |
+| `POST /v1/knowledge/delete` | 删除文档 | 删除指定文档 |
+| `POST /v1/knowledge/clear-documents` | 清空文档 | 清空所有文档，保留 FAQ |
 
 ### 响应格式
 
@@ -210,20 +221,9 @@ isort app tests scripts
 flake8 app tests scripts
 ```
 
-## 📝 FAQ 维护
+## 📝 知识库维护
 
-### 数据结构
-
-```json
-[
-  {
-    "question": "什么是应有成本？",
-    "answer": "应有成本是指..."
-  }
-]
-```
-
-### 维护方式
+### FAQ 维护
 
 **批量导入（推荐初始化）**：
 
@@ -240,12 +240,61 @@ curl -X POST http://localhost:8082/v1/faq/add \
   -d '{"question":"新问题","answer":"新答案"}'
 ```
 
+### 文档知识库
+
+支持上传以下格式文档：
+- PDF（推荐安装 PyMuPDF，否则使用 pypdf）
+- Word（.docx / .doc）
+- Excel（.xlsx / .xls）
+- CSV
+- Markdown（.md）
+- TXT
+
+**上传文档**：
+
+```bash
+curl -X POST http://localhost:8082/v1/knowledge/upload \
+  -F "file=@产品手册.pdf"
+```
+
+**查看知识库统计**：
+
+```bash
+curl http://localhost:8082/v1/knowledge/stats
+```
+
+**删除文档**：
+
+```bash
+curl -X POST http://localhost:8082/v1/knowledge/delete \
+  -H "Content-Type: application/json" \
+  -d '{"filename":"产品手册.pdf"}'
+```
+
+### 文档处理流程
+
+```
+上传文件
+    ↓
+DocumentLoader 解析文本
+    ↓
+TextSplitter 切分为 chunks（500 字/段，保留语义）
+    ↓
+Embedding API 生成向量
+    ↓
+ChromaDB 存储
+    ↓
+用户提问时语义检索 Top-K chunks
+    ↓
+LLM 基于上下文生成回答
+```
+
 ## 🛣️ 升级路线
 
+- [x] 文档知识库（PDF/Word 自动解析）
 - [ ] 流式输出（SSE 打字机效果）
 - [ ] 多轮对话上下文
 - [ ] 用户反馈收集（👍/👎）
-- [ ] 文档知识库（PDF/Word 自动解析）
 - [ ] 重排序 + 混合检索
 - [ ] 对话历史记录与分析看板
 
